@@ -169,6 +169,30 @@ namespace log4cpp {
             } else {
                 timeFormat = _timeFormat1;
             }
+
+            // This bit of code defines a non-standard %:z specifier that 
+            // generates UTC offsets with a : as required by RFC5424.
+            // Example: "+02:00" instead of "+0200"
+            const std::string::size_type zPos = timeFormat.find("%:z");
+            if (zPos != std::string::npos) {
+                std::string::size_type percentPos = zPos;
+                // Make sure the % in %:z is not escaped by an odd number of % characters
+                while (percentPos > 0 && timeFormat[percentPos-1] == '%') {
+                    percentPos--;
+                }
+                if ((zPos - percentPos) % 2 == 0) {
+                    char tz[8];
+                    std::strftime(tz, sizeof(tz), "%z", &currentTime);
+                    if (tz[0] == '-' || tz[0] == '+') {
+                        memmove(&tz[4], &tz[3], 3);
+                        tz[3] = ':';
+                    } else if (!tz[0]) {
+                        strcpy_s(tz, "Z");
+                    }
+                    timeFormat.replace(zPos, zPos + 3, tz);
+                }
+            }
+
             std::strftime(formatted, sizeof(formatted), timeFormat.c_str(), &currentTime);
             out << formatted;
         }
