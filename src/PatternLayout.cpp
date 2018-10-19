@@ -14,6 +14,7 @@
 #include <log4cpp/TimeStamp.hh>
 #include <log4cpp/FactoryParams.hh>
 #include <memory>
+#include <string.h>
 
 #ifdef LOG4CPP_HAVE_SSTREAM
 #include <sstream>
@@ -187,7 +188,7 @@ namespace log4cpp {
                         memmove(&tz[4], &tz[3], 3);
                         tz[3] = ':';
                     } else if (!tz[0]) {
-                        strcpy_s(tz, "Z");
+                        strcpy(tz, "Z");
                     }
                     timeFormat.replace(zPos, zPos + 3, tz);
                 }
