@@ -90,12 +90,15 @@ namespace log4cpp {
          * @param portNumber An alternative port number. Defaults to the 
          * standard syslog port number (514).
          * Value '-1' implies to use the default.         
+         * @param tcp true for TCP connections, false for UDP connections
+         * TCP connections will connect, send one octet-counted RFC6587 message and disconnect.
          **/         
         RemoteSyslogAppender(const std::string& name, 
                              const std::string& syslogName, 
                              const std::string& relayer, 
                              int facility = LOG_USER,
-                             int portNumber = 514);
+                             int portNumber = 514,
+                             bool tcp = false);
         virtual ~RemoteSyslogAppender();
 
         /**
@@ -131,6 +134,7 @@ namespace log4cpp {
 		int		_socket;
 #endif
         in_addr_t _ipAddr;
+        bool _tcp;
         private:
         int _cludge;
     };

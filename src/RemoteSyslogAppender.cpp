@@ -31,6 +31,13 @@
 #include <arpa/inet.h>
 #endif
 
+#ifdef WIN32
+#   define IS_VALID_SOCKET(sock) ((sock) != INVALID_SOCKET)
+#else
+#   define IS_VALID_SOCKET(sock) ((sock) >= 0)
+#   define INVALID_SOCKET (-1)
+#endif
+
 namespace log4cpp {
 
     int RemoteSyslogAppender::toSyslogPriority(Priority::Value priority) {
@@ -58,15 +65,17 @@ namespace log4cpp {
                                    const std::string& syslogName, 
                                    const std::string& relayer,
                                    int facility,
-                                   int portNumber) : 
+                                   int portNumber,
+                                   bool tcp) : 
         LayoutAppender(name),
         _syslogName(syslogName),
         _relayer(relayer),
         _facility((facility == -1) ? LOG_USER : facility),
         _portNumber((portNumber == -1) ? 514 : portNumber),
-        _socket (0),
+        _socket (INVALID_SOCKET),
         _ipAddr (0),
-        _cludge (0)
+        _cludge (0),
+        _tcp (tcp)
     {
         open();
     }
@@ -113,28 +122,26 @@ namespace log4cpp {
             }
             _ipAddr = *(in_addr_t*)(pent->h_addr); // fixed bug #1579890
         }
-        // Get a datagram socket.
-        _socket = socket(AF_INET, SOCK_DGRAM, 0);
-        if 
-#ifdef WIN32
-			(_socket == INVALID_SOCKET)
-#else
-			(_socket < 0) 
-#endif
-		{
-            // loglog("RemoteSyslogAppender: failed to open socket");
-            return; // fail silently                    
+
+        if (!_tcp) {
+            // Get a datagram socket.
+            _socket = socket(AF_INET, SOCK_DGRAM, 0);
+            if (!IS_VALID_SOCKET(_socket)) {
+                // loglog("RemoteSyslogAppender: failed to open socket");
+                return; // fail silently                    
+            }
+
         }
     }
 
     void RemoteSyslogAppender::close() {
-        if (_socket) {
+        if (!_tcp && IS_VALID_SOCKET(_socket)) {
 #ifdef WIN32
             closesocket (_socket);
 #else
             ::close (_socket);
 #endif
-            _socket = 0;
+            _socket = INVALID_SOCKET;
         }
     }
 
@@ -152,17 +159,39 @@ namespace log4cpp {
         // NO, do NOT use htonl on _ipAddr. Is already in network order.
         sain.sin_addr.s_addr = _ipAddr;
 
-        while (messageLength > 0) {
-            /* if packet larger than maximum (900 bytes), split
-               into two or more syslog packets. */
-            if (preambleLength + messageLength > 900) {
-                sendto (_socket, buf, 900, 0, (struct sockaddr *) &sain, sizeof (sain));
-                messageLength -= (900 - preambleLength);
-                std::memmove (buf + preambleLength, buf + 900, messageLength);
-                // note: we might need to sleep a bit here
-            } else {
-                sendto (_socket, buf, preambleLength + messageLength, 0, (struct sockaddr *) &sain, sizeof (sain));
-                break;
+        if (_tcp) {
+#ifdef WIN32
+            SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+#else
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+#endif
+            if (IS_VALID_SOCKET(sock)) {
+                int ret = connect(sock, (const sockaddr *)&sain, sizeof sockaddr_in);
+                if (ret >= 0) {
+                    char octet_framing[10];
+                    int octet_framing_length = sprintf(octet_framing, "%u ", messageLength + preambleLength);
+                    send(sock, octet_framing, octet_framing_length, 0);
+                    send(sock, buf, messageLength + preambleLength, 0);
+                }
+#ifdef WIN32
+                closesocket(sock);
+#else
+                ::close(sock);
+#endif
+            }
+        } else {
+            while (messageLength > 0) {
+                /* if packet larger than maximum (900 bytes), split
+                   into two or more syslog packets. */
+                if (preambleLength + messageLength > 900) {
+                    sendto(_socket, buf, 900, 0, (struct sockaddr *) &sain, sizeof(sain));
+                    messageLength -= (900 - preambleLength);
+                    std::memmove(buf + preambleLength, buf + 900, messageLength);
+                    // note: we might need to sleep a bit here
+                } else {
+                    sendto(_socket, buf, preambleLength + messageLength, 0, (struct sockaddr *) &sain, sizeof(sain));
+                    break;
+                }
             }
         }
 

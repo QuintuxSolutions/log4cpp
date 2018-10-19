@@ -245,8 +245,11 @@ namespace log4cpp {
             std::string syslogHost = _properties.getString(appenderPrefix + ".syslogHost", "localhost");
             int facility = _properties.getInt(appenderPrefix + ".facility", -1) * 8; // * 8 to get LOG_KERN, etc. compatible values. 
             int portNumber = _properties.getInt(appenderPrefix + ".portNumber", -1);
+            std::string protocol = _properties.getString(appenderPrefix + ".protocol", "udp");
+            std::transform(protocol.begin(), protocol.end(), protocol.begin(), ::tolower);
+            bool tcp = (protocol == "tcp");
             appender = new RemoteSyslogAppender(appenderName, syslogName, 
-                                                syslogHost, facility, portNumber);
+                                                syslogHost, facility, portNumber, tcp);
         }
 #endif // LOG4CPP_DISABLE_REMOTE_SYSLOG
 #ifdef LOG4CPP_HAVE_SYSLOG
