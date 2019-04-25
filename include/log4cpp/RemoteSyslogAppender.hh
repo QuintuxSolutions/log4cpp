@@ -16,9 +16,16 @@
 #include <log4cpp/LayoutAppender.hh>
 #include <log4cpp/Priority.hh>
 #ifdef WIN32
+#include <processthreadsapi.h>
 #include <winsock2.h>
+#define IS_VALID_SOCKET(sock) ((sock) != INVALID_SOCKET)
 #else
+#include <pthread.h>
 #include <netinet/in.h>
+#define SOCKET int
+#define closesocket ::close
+#define IS_VALID_SOCKET(sock) ((sock) >= 0)
+#define INVALID_SOCKET (-1)
 #endif
 
 #ifdef LOG4CPP_HAVE_SYSLOG
@@ -128,15 +135,20 @@ namespace log4cpp {
         const std::string _relayer;
         int _facility;
         int _portNumber;
-#ifdef	WIN32
-		SOCKET	_socket;
-#else	
-		int		_socket;
-#endif
+
+		SOCKET _socket;
+
         in_addr_t _ipAddr;
         bool _tcp;
+
         private:
-        int _cludge;
+#ifdef	WIN32
+        HANDLE _mutex;
+        bool _cludge;
+#else
+        pthread_mutex_t _mutex;
+#endif
+
     };
 }
 

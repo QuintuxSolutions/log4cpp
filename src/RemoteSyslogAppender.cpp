@@ -7,6 +7,12 @@
  * See the COPYING file for the terms of usage and distribution.
  */
 
+#ifdef WIN32
+//  Avoid annoying Microsoft warnings ...
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include "PortabilityImpl.hh"
 
 #ifdef LOG4CPP_HAVE_UNISTD_H
@@ -22,20 +28,11 @@
 #include <log4cpp/FactoryParams.hh>
 #include <memory>
 
-#ifdef WIN32
-#include <winsock2.h>
-#else
+#ifndef WIN32
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#endif
-
-#ifdef WIN32
-#   define IS_VALID_SOCKET(sock) ((sock) != INVALID_SOCKET)
-#else
-#   define IS_VALID_SOCKET(sock) ((sock) >= 0)
-#   define INVALID_SOCKET (-1)
 #endif
 
 namespace log4cpp {
@@ -74,15 +71,24 @@ namespace log4cpp {
         _portNumber((portNumber == -1) ? 514 : portNumber),
         _socket (INVALID_SOCKET),
         _ipAddr (0),
-        _cludge (0),
+#ifdef WIN32
+        _cludge(false),
+        _mutex(INVALID_HANDLE_VALUE),
+#else
+        _mutex(PTHREAD_MUTEX_INITIALIZER),
+#endif
         _tcp (tcp)
     {
+#ifdef WIN32
+        _mutex = CreateMutex(NULL, FALSE, NULL);
+#endif
         open();
     }
     
     RemoteSyslogAppender::~RemoteSyslogAppender() {
         close();
 #ifdef WIN32
+        CloseHandle(_mutex);
         if (_cludge) {
             // we started it, we end it.
             WSACleanup ();
@@ -92,20 +98,20 @@ namespace log4cpp {
 
     void RemoteSyslogAppender::open() {
         if (!_ipAddr) {
-            struct hostent *pent = gethostbyname (_relayer.c_str ());
+            struct hostent *pent = gethostbyname(_relayer.c_str());
 #ifdef WIN32
             if (pent == NULL) {
-                if (WSAGetLastError () == WSANOTINITIALISED) {
+                if (WSAGetLastError() == WSANOTINITIALISED) {
                     WSADATA wsaData;
                     int err;
- 
-                    err = WSAStartup (0x101, &wsaData );
+
+                    err = WSAStartup(0x101, &wsaData);
                     if (err) {
                         // loglog("RemoteSyslogAppender: WSAStartup returned %d", err);
                         return; // fail silently
                     }
-                    pent = gethostbyname (_relayer.c_str ());
-                    _cludge = 1;
+                    pent = gethostbyname(_relayer.c_str());
+                    _cludge = true;
                 } else {
                     // loglog("RemoteSyslogAppender: gethostbyname returned error");
                     return; // fail silently
@@ -113,8 +119,8 @@ namespace log4cpp {
             }
 #endif
             if (pent == NULL) {
-                in_addr_t ip = inet_addr (_relayer.c_str ());
-                pent = gethostbyaddr ((const char *) &ip, sizeof(in_addr_t), AF_INET);
+                in_addr_t ip = inet_addr(_relayer.c_str());
+                pent = gethostbyaddr((const char *)&ip, sizeof(in_addr_t), AF_INET);
                 if (pent == NULL) {
                     // loglog("RemoteSyslogAppender: failed to resolve host %s", _relayer.c_str());
                     return; // fail silently                    
@@ -135,14 +141,20 @@ namespace log4cpp {
     }
 
     void RemoteSyslogAppender::close() {
-        if (!_tcp && IS_VALID_SOCKET(_socket)) {
 #ifdef WIN32
-            closesocket (_socket);
+        WaitForSingleObject(_mutex, INFINITE);
 #else
-            ::close (_socket);
+        pthread_mutex_lock(&_mutex);
 #endif
+        if (IS_VALID_SOCKET(_socket)) {
+            closesocket(_socket);
             _socket = INVALID_SOCKET;
         }
+#ifdef WIN32
+        ReleaseMutex(_mutex);
+#else
+        pthread_mutex_unlock(&_mutex);
+#endif
     }
 
     void RemoteSyslogAppender::_append(const LoggingEvent& event) {
@@ -161,24 +173,42 @@ namespace log4cpp {
 
         if (_tcp) {
 #ifdef WIN32
-            SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+            WaitForSingleObject(_mutex, INFINITE);
 #else
-            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            pthread_mutex_lock(&_mutex);
 #endif
-            if (IS_VALID_SOCKET(sock)) {
-                int ret = connect(sock, (const sockaddr *)&sain, sizeof sockaddr_in);
-                if (ret >= 0) {
-                    char octet_framing[10];
-                    int octet_framing_length = sprintf(octet_framing, "%u ", messageLength + preambleLength);
-                    send(sock, octet_framing, octet_framing_length, 0);
-                    send(sock, buf, messageLength + preambleLength, 0);
+
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (!IS_VALID_SOCKET(_socket)) {
+                    _socket = socket(AF_INET, SOCK_STREAM, 0);
+                    if (IS_VALID_SOCKET(_socket)) {
+                        if (connect(_socket, (const sockaddr *)&sain, sizeof sockaddr_in) < 0) {
+                            closesocket(_socket);
+                            _socket = INVALID_SOCKET;
+                        }
+                    }
                 }
-#ifdef WIN32
-                closesocket(sock);
-#else
-                ::close(sock);
-#endif
+                if (IS_VALID_SOCKET(_socket)) {
+                    char octet_framing[10];
+                    int octet_framing_length = sprintf(octet_framing, "%u ", (unsigned int)(messageLength + preambleLength));
+                    if ((send(_socket, octet_framing, octet_framing_length, 0) == (int)octet_framing_length) &&
+                        (send(_socket, buf, (int)messageLength + preambleLength, 0) == (int)messageLength + preambleLength)) {
+                        //  Attempt succeeded.  No need to try further ...
+                        break;
+                    } else {
+                        //  Attempt failed.  Socket in unclear state, so to resync
+                        //  close it and try with a fresh one ...
+                        closesocket(_socket);
+                        _socket = INVALID_SOCKET;
+                    }
+                }
             }
+
+#ifdef WIN32
+            ReleaseMutex(_mutex);
+#else
+            pthread_mutex_unlock(&_mutex);
+#endif
         } else {
             while (messageLength > 0) {
                 /* if packet larger than maximum (900 bytes), split
@@ -189,7 +219,7 @@ namespace log4cpp {
                     std::memmove(buf + preambleLength, buf + 900, messageLength);
                     // note: we might need to sleep a bit here
                 } else {
-                    sendto(_socket, buf, preambleLength + messageLength, 0, (struct sockaddr *) &sain, sizeof(sain));
+                    sendto(_socket, buf, preambleLength + (int)messageLength, 0, (struct sockaddr *) &sain, sizeof(sain));
                     break;
                 }
             }
